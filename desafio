@@ -1,0 +1,140 @@
+const { google } = require('googleapis');
+const { promisify } = require('util');
+const readline = require('readline');
+const fs = require('fs');
+
+const SCOPES = ['https://www.googleapis.com/auth/spreadsheets'];
+const TOKEN_PATH = 'token.json';
+const SPREADSHEET_ID = '1Cp9JaWeHyVF-ALm4ao7g-x5t_vZInFF2I6pC-O0bRvI';
+const RANGE = 'Sheet1!A:H'; // Adjust the range as per your spreadsheet
+
+const rl = readline.createInterface({
+  input: process.stdin,
+  output: process.stdout
+});
+
+const readFileAsync = promisify(fs.readFile);
+
+// Load client secrets from a local file.
+readFileAsync('credentials.json')
+  .then(credentials => authorize(JSON.parse(credentials)))
+  .then(getData)
+  .then(processData)
+  .then(updateSheet)
+  .catch(console.error);
+
+function authorize(credentials) {
+  const client_id = credentials.web.client_id; 
+  // const client_id = credentials.installed; 
+  const oAuth2Client = new google.auth.OAuth2(
+    client_id, '', ''
+  );
+
+  return new Promise((resolve, reject) => {
+    fs.readFile(TOKEN_PATH, (err, token) => {
+      if (err) {
+        getAccessToken(oAuth2Client)
+          .then(token => resolve(token))
+          .catch(err => reject(err));
+      } else {
+        oAuth2Client.setCredentials(JSON.parse(token));
+        resolve(oAuth2Client);
+      }
+    });
+  });
+}
+
+function getAccessToken(oAuth2Client) {
+  const authUrl = oAuth2Client.generateAuthUrl({
+    access_type: 'offline',
+    scope: SCOPES,
+  });
+  console.log('Authorize this app by visiting this url:', authUrl + 'https://developers.google.com/oauthplayground');
+  return new Promise((resolve, reject) => {
+    rl.question('Enter the code from that page here: ', (code) => {
+      rl.close();
+	console.log("cheguei aqui");
+      oAuth2Client.getToken(code, (err, token) => {
+        if (err) {
+          reject('Error retrieving access token', err);
+        }
+        oAuth2Client.setCredentials(token);
+        // Store the token to disk for later program executions
+        fs.writeFile(TOKEN_PATH, JSON.stringify(token), (err) => {
+          if (err) reject(err);
+          console.log('Token stored to', TOKEN_PATH);
+        });
+        resolve(oAuth2Client);
+      });
+    });
+  });
+}
+
+async function getData(auth) {
+  const sheets = google.sheets({ version: 'v4', auth });
+  try {
+    const response = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: RANGE,
+    });
+    const data = {values: response.data.values, auth};
+    return data;
+  } catch (err) {
+    console.error('The API returned an error:', err);
+    throw err;
+  }
+}
+
+async function processData(data) {
+  const totalAulas = 60; // Baseado no seu exemplo de "Total de aulas no semestre: 60"
+  const resultados = [];
+
+  // Pular cabeçalhos e começar do índice 1
+  for (let i = 3; i < data.values.length; i++) {
+    const aluno = data.values[i];
+    const matricula = aluno[0];
+    const nome = aluno[1];
+    const faltas = parseInt(aluno[2]);
+    const notas = aluno.slice(3, 6).map(Number);
+    const media = notas.reduce((acc, curr) => acc + curr, 0) / notas.length;
+    const porcentagemFaltas = (faltas / totalAulas) * 100;
+
+    let situacao = '';
+    let naf = 'N/A'; // NAF não aplicável por padrão
+
+    if (porcentagemFaltas > 25) {
+      situacao = 'Reprovado por Falta';
+    } else if (media < 5) {
+      situacao = 'Reprovado por Nota';
+    } else if (media >= 5 && media < 7) {
+      situacao = 'Exame Final';
+      naf = Math.ceil(10 - media); // Simplificação da fórmula para calcular NAF
+    } else {
+      situacao = 'Aprovado';
+    }
+
+    resultados.push({ Matricula: matricula, Aluno: nome, Faltas: faltas, P1: parseInt(aluno[3]), P2: parseInt(aluno[4]), P3: parseInt(aluno[5]), Situacao: situacao, NAF: naf });
+  }
+  const formattedData = resultados.map(({Matricula, Aluno, Faltas, P1, P2, P3, Situacao, NAF}) => 
+    [Matricula, Aluno, Faltas, P1, P2, P3, Situacao, NAF]
+  );
+  const data2 = {formattedData, auth: data.auth}
+  return data2;
+}
+
+async function updateSheet(data) {
+  const sheets = google.sheets({version: 'v4', auth: data.auth});
+  try {
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SPREADSHEET_ID,
+      range: RANGE, // Ajuste conforme necessário
+      valueInputOption: 'USER_ENTERED',
+      resource: {
+        values: data.formattedData.map(item => [item.Matricula, item.Aluno, item.Faltas, item.P1, item.P2, item.P3, item.Situacao, item.NAF])
+      },
+    });
+    console.log('Dados atualizados com sucesso!');
+  } catch (err) {
+    console.error('Erro ao atualizar a planilha:', err);
+  }
+}
